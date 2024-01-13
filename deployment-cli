@@ -2,42 +2,89 @@
 import os
 import requests
 import argparse
+import json
+import subprocess
+
+# Function to get default owner and repo from the 'origin' remote
+def get_default_owner_repo():
+    try:
+        # Get the remote URL of the 'origin' remote
+        remote_url = subprocess.check_output(["git", "config", "--get", "remote.origin.url"]).decode("utf-8").strip()
+
+        # Extract owner and repo from the remote URL
+        if "github.com" in remote_url:
+            parts = remote_url.split("/")
+            owner = parts[-2]
+            repo = parts[-1].rstrip(".git")
+            return owner, repo
+        else:
+            raise ValueError("Remote URL does not appear to be from GitHub.")
+    except Exception as e:
+        raise ValueError(f"Error while getting default owner and repo: {e}")
 
 # Global Constants
 # Set default values from environment variables
-DEFAULT_OWNER = os.environ.get("GITHUB_OWNER", "renjithpk")
-DEFAULT_REPO = os.environ.get("GITHUB_REPO", "gh-deployment-manager")
-DEFAULT_TOKEN = os.environ.get("GITHUB_ACCESS_TOKEN", Non
+DEFAULT_OWNER, DEFAULT_REPO = get_default_owner_repo()
+DEFAULT_TOKEN = os.environ.get("GITHUB_ACCESS_TOKEN", None)
 API_BASE_URL = "https://api.github.com/repos"
 
-# Parse command-line arguments
-parser = argparse.ArgumentParser(description="A CLI to view and delete GitHub Deployment Environmentd and versions")
-parser.add_argument("--owner", default=DEFAULT_OWNER, help="GitHub repository owner")
-parser.add_argument("--repo", default=DEFAULT_REPO, help="GitHub repository name")
-parser.add_argument("--env", help="Environment name")
-parser.add_argument("--token", default=DEFAULT_TOKEN, help="GitHub Personal Access Token")
-parser.add_argument("--list", action="store_true", help="List deployments without deleting")
-parser.add_argument("--delete", action="store_true", help="Delete environment and associated deployments")
-args = parser.parse_args()
+def main():
+    args = parse_arguments()
 
-# GitHub Repository Information
-owner = args.owner
-repo = args.repo
+    # GitHub Repository Information
+    owner = args.owner
+    repo = args.repo
 
-# Get Personal Access Token
-access_token = args.token
+    # Get Personal Access Token
+    access_token = args.token
 
-# Environment Information
-environment_name = args.env
+    # Environment Information
+    environment_name = args.env
 
-# GitHub API Base URL
-api_url = f"{API_BASE_URL}/{owner}/{repo}"
+    # GitHub API Base URL
+    api_url = f"{API_BASE_URL}/{owner}/{repo}"
 
-# Headers for API requests
-headers = {"Authorization": f"token {access_token}"}
+    # Headers for API requests
+    headers = {"Authorization": f"token {access_token}"}
 
-# Function to delete an environment
-def delete_environment():
+    if not args.list and not args.delete and not args.create:
+        list_all_environments(api_url, headers)
+
+    if args.list:
+        list_deployments(api_url, headers, environment_name)
+
+    if args.delete:
+        deployment_ids = list_deployments(api_url, headers, environment_name)
+        if deployment_ids is not None:
+            for deployment_id in deployment_ids:
+                delete_deployment(api_url, headers, deployment_id)
+            delete_environment(api_url, headers, environment_name)
+
+    if args.create:
+        create_deployment(api_url, headers, args.deployment_payload_json)
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="A CLI to view, create, and delete GitHub Deployment Environments and versions")
+    parser.add_argument("--owner", default=DEFAULT_OWNER, help="GitHub repository owner")
+    parser.add_argument("--repo", default=DEFAULT_REPO, help="GitHub repository name")
+    parser.add_argument("--env", help="Environment name")
+    parser.add_argument("--token", default=DEFAULT_TOKEN, help="GitHub Personal Access Token")
+    parser.add_argument("--list", action="store_true", help="List deployments without deleting")
+    parser.add_argument("--delete", action="store_true", help="Delete environment and associated deployments")
+    parser.add_argument("--create", action="store_true", help="Create a new deployment.")
+    parser.add_argument("--payload", dest="deployment_payload_json", help="JSON payload for creating a deployment.")
+    return parser.parse_args()
+
+def handle_api_errors(response, action):
+    if response.status_code == 401:
+        print(f"Error: Unauthorized. Please check your access token.")
+    elif response.status_code == 403:
+        print(f"Error: Forbidden. The provided token may not have sufficient permissions for {action}.")
+    else:
+        print(f"Error: {action} failed with status code {response.status_code}.")
+        print("Response:", response.text)
+
+def delete_environment(api_url, headers, environment_name):
     environment_url = f"{api_url}/environments/{environment_name}"
     response = requests.delete(environment_url, headers=headers)
     
@@ -46,11 +93,10 @@ def delete_environment():
     elif response.status_code == 404:
         print(f"Environment {environment_name} not found. Nothing to delete.")
     else:
-        print(f"Failed to delete environment {environment_name}. Status Code: {response.status_code}")
+        handle_api_errors(response, "Delete environment")
         print("Response:", response.text)
 
-# Function to delete a deployment by ID
-def delete_deployment(deployment_id):
+def delete_deployment(api_url, headers, deployment_id):
     deployment_url = f"{api_url}/deployments/{deployment_id}"
     response = requests.delete(deployment_url, headers=headers)
     
@@ -59,11 +105,10 @@ def delete_deployment(deployment_id):
     elif response.status_code == 404:
         print(f"Deployment {deployment_id} not found. Nothing to delete.")
     else:
-        print(f"Failed to delete deployment {deployment_id}. Status Code: {response.status_code}")
+        handle_api_errors(response, "Delete deployment")
         print("Response:", response.text)
 
-# Function to list deployments for the specified environment
-def list_deployments():
+def list_deployments(api_url, headers, environment_name):
     deployments_url = f"{api_url}/deployments"
     params = {"environment": environment_name} if environment_name else {}
     response = requests.get(deployments_url, headers=headers, params=params)
@@ -77,39 +122,64 @@ def list_deployments():
         print(f"No deployments found for environment {environment_name}.")
         return []
     else:
-        print(f"Failed to retrieve deployments. Status Code: {response.status_code}")
+        handle_api_errors(response, "List deployments")
         print("Response:", response.text)
         return None
 
-# Function to list all environments
-def list_all_environments():
+def list_all_environments(api_url, headers):
     environments_url = f"{api_url}/environments"
     response = requests.get(environments_url, headers=headers)
-    if response.status_code == 200:
+
+    try:
+        response.raise_for_status()
         environments_json = response.json()
-        environment_names = [env["name"] for env in environments_json]
-        print("Available Environment Names:", environment_names)
+
+        if isinstance(environments_json, list):
+            if not environments_json:
+                print("No environments found.")
+            else:
+                environment_names = [env["name"] for env in environments_json]
+                print("Available Environment Names:", environment_names)
+        elif isinstance(environments_json, dict) and "environments" in environments_json:
+            environments_list = environments_json["environments"]
+            if not environments_list:
+                print("No environments found.")
+            else:
+                environment_names = [env["name"] for env in environments_list]
+                print("Available Environment Names:", environment_names)
+        else:
+            print("Error: Unexpected response format.")
+            print("Response:", response.text)
+    except requests.exceptions.HTTPError as http_err:
+        if response.status_code == 404:
+            print("No environments found.")
+        else:
+            print(f"HTTP error occurred: {http_err}")
+            print("Response:", response.text)
+    except json.JSONDecodeError as json_err:
+        print(f"JSON decoding error occurred: {json_err}")
+        print("Response:", response.text)
+    except Exception as err:
+        print(f"An error occurred: {err}")
+
+
+def create_deployment(api_url, headers, deployment_payload_json):
+    try:
+        deployment_payload = json.loads(deployment_payload_json)
+    except json.JSONDecodeError as e:
+        print(f"Error decoding JSON: {e}")
+        return
+
+    deployment_url = f"{api_url}/deployments"
+    response = requests.post(deployment_url, headers=headers, data=json.dumps(deployment_payload))
+    
+    if response.status_code == 201:
+        deployment_info = response.json()
+        deployment_id = deployment_info.get("id")
+        print(f"Created a new deployment (ID: {deployment_id}) successfully.")
     else:
-        print(f"Failed to retrieve environment names. Status Code: {response.status_code}")
+        handle_api_errors(response, "Create deployment")
         print("Response:", response.text)
 
-# List all environment names if neither --list nor --delete is passed
-if not args.list and not args.delete:
-    list_all_environments()
-
-# List deployments without deleting
-if args.list:
-    list_deployments()
-
-# Delete the specified environment and associated deployments
-if args.delete:
-    # List deployments before deleting
-    deployment_ids = list_deployments()
-
-    # Delete each deployment
-    if deployment_ids is not None:
-        for deployment_id in deployment_ids:
-            delete_deployment(deployment_id)
-
-    # Delete the environment
-    delete_environment()
+if __name__ == "__main__":
+    main()
