@@ -60,7 +60,7 @@ class GitHubDeploymentManagerParser:
             if remote_url.endswith(".git"):
                 parts = remote_url.split("/")
                 owner = parts[-2]
-                repo = parts[-1].rstrip(".git")
+                repo = parts[-1][:-4]
                 return owner, repo
             else:
                 raise ValueError("Remote URL does not appear to be from GitHub.")
