@@ -127,8 +127,7 @@ class GitHubDeployment:
         if response.status_code == 200:
             deployments_json = response.json()
             if deployments_json:
-                self.print_deployments_list(deployments_json)
-                return [deployment["id"] for deployment in deployments_json]
+                return deployments_json
             else:
                 print(f"No deployments found for environment {environment_name}.")
                 return []
@@ -141,7 +140,7 @@ class GitHubDeployment:
             return None
 
     def print_deployments_list(self, deployments):
-        print("{:<15} {:<25} {:<20} {:<25} {:<40}".format("ID", "Created At", "Creator Name", "Environment", "Description"))
+        print("{:<15} {:<25} {:<20} {:<20} {:<40}".format("Deployment ID", "Created At", "Creator Name", "Environment", "Description"))
         print("-" * 130)
         for deployment in deployments:
             deployment_id = deployment.get('id', 'N/A')
@@ -149,8 +148,23 @@ class GitHubDeployment:
             creator_name = deployment.get('creator', {}).get('login', 'N/A')
             environment = deployment.get('environment', {})
             description = deployment.get('description', 'N/A')
-            print("{:<15} {:<25} {:<20} {:<25} {:<40}".format(str(deployment_id), str(created_at), str(creator_name), str(environment), str(description)))
+            print("{:<15} {:<25} {:<20} {:<20} {:<40}".format(str(deployment_id), str(created_at), str(creator_name), str(environment), str(description)))
 
+    def get_deployment_by_id(self, deployment_id):
+        deployment_url = f"{self.api_base_url}/deployments/{deployment_id}"
+        headers = {"Authorization": self.token}
+        response = requests.get(deployment_url, headers=headers)
+        if response.status_code == 200:
+            deployment_info = response.json()
+            return deployment_info
+        elif response.status_code == 404:
+            print(f"No deployment found for deployment ID {deployment_id}.")
+            return None
+        else:
+            self.handle_api_errors(response, "Get deployment by ID")
+            print("Response:", response.text)
+            return None
+  
     def list_all_environments(self):
         environments_url = f"{self.api_base_url}/environments"
         headers = {"Authorization": self.token}
@@ -198,8 +212,12 @@ class GitHubDeployment:
         print(f"  - Task: {deployment_info.get('task', 'N/A')}")
         print(f"  - Created at: {deployment_info.get('created_at', 'N/A')}")
         print(f"  - Updated at: {deployment_info.get('updated_at', 'N/A')}")
-        # Add more details as needed
-        print()
+        payload_info = deployment_info.get('payload')
+        if payload_info:
+            print("\nPayload:")
+            print(json.dumps(payload_info, indent=2))
+        else:
+            print("\nNo payload associated with this deployment.")
 
     def create_deployment(self, deployment_payload_json):
         headers = {"Authorization": self.token}
@@ -230,15 +248,18 @@ if __name__ == "__main__":
     if args.action == "get":
         if args.resource == "environment":
             if args.target:
-                util.list_deployments(args.target)
+                deployments_info = util.list_deployments(args.target)
+                util.print_deployments_list(deployments_info)
             else:
                 util.list_all_environments()
         elif args.resource == "deployment":
             if args.target:
-                deployment_info = util.view_deployment(args.target)
-                util.print_deployment(deployment_info)
+                deployment_info = util.get_deployment_by_id(args.target)
+                if deployment_info:
+                    util.print_deployment(deployment_info)
             else:
-                util.list_deployments()
+                deployments_info = util.list_deployments()
+                util.print_deployments_list(deployments_info)
     elif args.action == "delete":
         if args.resource == "environment":
             util.delete_environment(args.target)
@@ -254,3 +275,4 @@ if __name__ == "__main__":
             print("Functionality Not implemented")
     else:
         print("Invalid action.")
+    print()
