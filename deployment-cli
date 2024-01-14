@@ -6,63 +6,55 @@ import requests
 import subprocess
 
 class ParsedArgs:
-    def __init__(self, action, resource, environment, deployment_id, authorization_header, verbose, url, create_payload):
+    def __init__(self, action, resource, target, authorization_header, verbose, url, create_payload):
         self.action = action
         self.resource = resource
-        self.environment = environment
-        self.deployment_id = deployment_id
+        self.target = target
         self.authorization_header = authorization_header
         self.verbose = verbose
         self.url = url
         self.create_payload = create_payload
 
+
 class GitHubDeploymentManagerParser:
     def __init__(self):
         self.parser = argparse.ArgumentParser(
-            usage="""%(prog)s <command> [options] 
-
-Commands:
-  get                                List all environments
-  get <environment>                  List all deployments in the specified environment
-  get <environment> <deployment_id>  List details of the specified deployment in the environment
-
-  delete <environment>               Delete the specified environment
-  delete <deployment_id>             Delete the specified deployment
-
-  create --payload <payload> Create a new deployment using the provided JSON payload""")
+            usage="""
+            %(prog)s get environment [options]
+            %(prog)s get environment <env_id> [options]
+            %(prog)s get deployment [options]
+            %(prog)s get deployment <deploy_id> [options]
+            %(prog)s delete environment <env_id> [options]
+            %(prog)s delete deployment <deploy_id> [options]
+            %(prog)s create deployment --payload <payload> [options]
+            """)
         self._add_arguments()
 
     def _add_arguments(self):
-        # Add action (get, delete, create)
         self.parser.add_argument('action', choices=['get', 'delete', 'create'], help='Action to perform')
 
-        # Add environment and deployment id
-        self.parser.add_argument('environment', nargs='?', default=None, help='Environment name')
-        self.parser.add_argument('deployment_id', nargs='?', default=None, help='Deployment ID')
+        self.parser.add_argument('resource', choices=['environment', 'deployment'], help='Resource type')
 
-        # Add global options
-        self.parser.add_argument('--authorization_header', default=os.getenv('GITHUB_AUTH_HEADER', 'default_value_from_env'), help='Authorization header value')
+        self.parser.add_argument('target', nargs='?', default=None, help='Environment name or Deployment ID')
+
+        self.parser.add_argument('--authorization_header', default=os.getenv('GITHUB_AUTH_HEADER', 'default_value_from_env'), help='Authorization header value, default GITHUB_AUTH_HEADER env variable')
+
         self.parser.add_argument('--verbose', action='store_true', help='Enable verbose mode')
 
-        # Add GitHub API URL with a default value
-        self.parser.add_argument('--api_url', default='https://api.github.com', help='GitHub API URL')
+        self.parser.add_argument('--api_url', default=os.getenv('GITHUB_API_URL', 'https://api.github.com'), help='GitHub API URL, default from GITHUB_API_URL env')
 
-        # Add options for repo owner and repo name
         self.parser.add_argument('--repo-owner', help='Repository owner')
+
         self.parser.add_argument('--repo-name', help='Repository name')
 
-        # Create Deployment payload
-        self.parser.add_argument('--payload', help='json data to create a new deployment')
+        self.parser.add_argument('--payload', help='JSON data to create a new deployment')
 
-    def get_repo(self):
-        # Check if both --repo-owner and --repo-name are provided
-        if self.repo_owner and self.repo_name:
-            return self.repo_owner, self.repo_name
-        elif self.repo_owner or self.repo_name:
-            # If only one of them is provided, fail
+    def get_repo(self, repo_owner, repo_name):
+        if repo_owner and repo_name:
+            return repo_owner, repo_name
+        elif repo_owner or repo_name:
             raise ValueError("Both --repo-owner and --repo-name must be provided or neither.")
 
-        # Attempt to get the default owner and repo from the git remote URL
         try:
             remote_url = subprocess.check_output(["git", "config", "--get", "remote.origin.url"]).decode("utf-8").strip()
             if remote_url.endswith(".git"):
@@ -77,29 +69,12 @@ Commands:
 
     def parse_command_line(self):
         args = self.parser.parse_args()
-
-        # Store repo-owner and repo-name from command line options
-        self.repo_owner = args.repo_owner
-        self.repo_name = args.repo_name
-
-        resource = "none"
-        # Determine the resource based on provided options
-        if args.environment and args.deployment_id:
-            resource = "deployment"
-        elif args.environment:
-            resource = "environment"
-
-        # Call get_repo method only if both options are not present
-        owner, repo_name = self.get_repo() if not (self.repo_owner and self.repo_name) else (self.repo_owner, self.repo_name)
-
-        # Build the URL using the provided or default values
+        owner, repo_name = self.get_repo(args.repo_owner, args.repo_name)
         url = f"{args.api_url}/repos/{owner}/{repo_name}"
-        # Return the parsed arguments
         return ParsedArgs(
             action=args.action,
-            resource=resource,
-            environment=args.environment,
-            deployment_id=args.deployment_id,
+            resource=args.resource,
+            target=args.target,
             authorization_header=args.authorization_header,
             verbose=args.verbose,
             url=url,
@@ -125,7 +100,7 @@ class GitHubDeployment:
         headers = {"Authorization": self.token}
         response = requests.delete(environment_url, headers=headers)
         if response.status_code == 204:
-            print(f"Deleted environment {environment_name} successfully.")
+            print(f"Deleted environment {environment_name} and associated deployments successfully.")
         elif response.status_code == 404:
             print(f"Environment {environment_name} not found. Nothing to delete.")
         else:
@@ -144,7 +119,7 @@ class GitHubDeployment:
             self.handle_api_errors(response, "Delete deployment")
             print("Response:", response.text)
 
-    def list_deployments(self, environment_name):
+    def list_deployments(self, environment_name=None):
         deployments_url = f"{self.api_base_url}/deployments"
         headers = {"Authorization": self.token}
         params = {"environment": environment_name} if environment_name else {}
@@ -152,28 +127,29 @@ class GitHubDeployment:
         if response.status_code == 200:
             deployments_json = response.json()
             if deployments_json:
-                self.print_deployment_info(deployments_json)
+                self.print_deployments_list(deployments_json)
                 return [deployment["id"] for deployment in deployments_json]
             else:
                 print(f"No deployments found for environment {environment_name}.")
                 return []
         elif response.status_code == 404:
-            print(f"No deployments found for environment {environment_name}.")
+            print("No deployments found.")
             return []
         else:
             self.handle_api_errors(response, "List deployments")
             print("Response:", response.text)
             return None
 
-    def print_deployment_info(self, deployments):
-        print("{:<20} {:<40} {:<30} {:<20}".format("ID", "Description", "Created At", "Creator Name"))
-        print("-" * 110)
+    def print_deployments_list(self, deployments):
+        print("{:<15} {:<25} {:<20} {:<25} {:<40}".format("ID", "Created At", "Creator Name", "Environment", "Description"))
+        print("-" * 130)
         for deployment in deployments:
             deployment_id = deployment.get('id', 'N/A')
-            description = deployment.get('description', 'N/A')
             created_at = deployment.get('created_at', 'N/A')
             creator_name = deployment.get('creator', {}).get('login', 'N/A')
-            print("{:<20} {:<40} {:<30} {:<20}".format(str(deployment_id), str(description), str(created_at), str(creator_name)))
+            environment = deployment.get('environment', {})
+            description = deployment.get('description', 'N/A')
+            print("{:<15} {:<25} {:<20} {:<25} {:<40}".format(str(deployment_id), str(created_at), str(creator_name), str(environment), str(description)))
 
     def list_all_environments(self):
         environments_url = f"{self.api_base_url}/environments"
@@ -215,7 +191,6 @@ class GitHubDeployment:
               updated_at = environment.get('updated_at', 'N/A')
               print("{:<30} {:<20} {:<30}".format(str(name), str(environment_id), str(updated_at)))
 
-
     def print_deployment(self, deployment_info):
         print("Deployment Information:")
         print(f"  - ID: {deployment_info.get('id', 'N/A')}")
@@ -248,27 +223,34 @@ class GitHubDeployment:
 if __name__ == "__main__":
     parser = GitHubDeploymentManagerParser()
 
-    # Get the parsed arguments
     args = parser.parse_command_line()
 
-    # Create an instance of GitHubDeployment with the parsed arguments
     util = GitHubDeployment(api_base_url=args.url, token=args.authorization_header)
-
-    # Call the appropriate method based on the action
+    print()
     if args.action == "get":
-        if args.resource == "none":
-            util.list_all_environments()
-        elif args.resource == "environment":
-            util.list_deployments(args.environment)
+        if args.resource == "environment":
+            if args.target:
+                util.list_deployments(args.target)
+            else:
+                util.list_all_environments()
         elif args.resource == "deployment":
-            deployment_info = util.view_deployment(args.deployment_id)
-            util.print_deployment(deployment_info)
+            if args.target:
+                deployment_info = util.view_deployment(args.target)
+                util.print_deployment(deployment_info)
+            else:
+                util.list_deployments()
     elif args.action == "delete":
-        if args.resource == "deployment":
-            util.delete_deployment(args.deployment_id)
-        elif args.resource == "environment":
-            util.delete_environment(args.environment)
+        if args.resource == "environment":
+            util.delete_environment(args.target)
+        elif args.resource == "deployment":
+            util.delete_deployment(args.target)
     elif args.action == "create":
-        util.create_deployment(args.create_payload)
+        if args.resource == "deployment":
+            if args.create_payload:
+                util.create_deployment(args.create_payload)
+            else:
+                print("Error: --payload is required for 'create' action.")
+        elif args.resource == "environment":
+            print("Functionality Not implemented")
     else:
         print("Invalid action.")
